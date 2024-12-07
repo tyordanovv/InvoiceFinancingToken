@@ -1,0 +1,11 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "hardhat",
+            "request": "launch",
+            "name": "Debug Hardhat Tests",
+            "program": "${workspaceFolder}/test/*.js"
+        }
+    ]
+}
