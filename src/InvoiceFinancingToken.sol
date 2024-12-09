@@ -66,6 +66,14 @@ contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard {
     }
 
     /**
+     * @dev Modifier to check invoice ownership.
+     */
+    modifier onlyCompany(uint256 invoiceId) {
+        require(invoices[invoiceId].companyWallet == msg.sender, "Not authorized");
+        _;
+    }
+
+    /**
      * @dev Deposit collateral for the company.
      */
     function depositCollateral() external payable nonReentrant {
@@ -125,7 +133,7 @@ contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard {
         if (_maturityDate <= block.timestamp) revert InvalidMaturityDate(block.timestamp, _maturityDate);
         if (bytes(_ipfsDocumentHash).length == 0) revert MissingIPFSHash();
 
-        uint256 requiredCollateral = (_tokenPrice * _tokensTotal * 80) / 100;
+        uint256 requiredCollateral = (_tokenPrice * _tokensTotal * 80) / 100; // TODO *calculateRequiredCollateral* implement better approach calculating the required collateral in stable coin. fetch the ETH/USDT price from oracle.
         uint256 availableCollateral = companyCollateral[msg.sender] - calculateLockedCollateral(msg.sender);
         if (availableCollateral < requiredCollateral) revert InsufficientCollateral(availableCollateral, requiredCollateral);
 
@@ -188,7 +196,7 @@ contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard {
     function redeemTokens(
         uint256 _invoiceId,
         uint256 _tokenId
-    ) external nonReentrant {
+    ) external nonReentrant onlyCompany(_invoiceId) {
         InvoiceDetails storage invoice = invoices[_invoiceId];
         if (block.timestamp < invoice.maturityDate) revert InvalidMaturityDate(block.timestamp, invoice.maturityDate);
 

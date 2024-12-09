@@ -81,6 +81,9 @@ contract InvoiceFinancingTokenTest is Test {
         assertTrue(storedIsActive);
         assertEq(storedTokensRemaining, tokensTotal);
         assertEq(storedIpfsHash, ipfsHash);
+
+        // TODO Fix when calculateRequiredCollateral is imlpemented
+        assertEq(invoiceToken.calculateLockedCollateral(company1), 8000);
     }
 
     function testCreateInvoiceTokenNoCollateral() public {
@@ -117,7 +120,7 @@ contract InvoiceFinancingTokenTest is Test {
 
         uint256 invoiceId = 1;
         uint256 totalAmount = 10000;
-        uint256 tokenPrice = 100;
+        uint256 tokenPrice = 1000;
         uint256 tokensTotal = 10;
         uint256 maturityDate = block.timestamp + 30 days;
         string memory ipfsHash = "QmHash123";
@@ -137,7 +140,7 @@ contract InvoiceFinancingTokenTest is Test {
         vm.deal(investor1, 10 ether);
 
         // Purchase tokens
-        uint256 purchaseAmount = 10;
+        uint256 purchaseAmount = 2;
         invoiceToken.purchaseToken{value: purchaseAmount * tokenPrice}(
             invoiceId, 
             purchaseAmount
@@ -145,6 +148,9 @@ contract InvoiceFinancingTokenTest is Test {
         vm.stopPrank();
 
         // Verify purchase
+        assertEq(invoiceToken.calculateLockedCollateral(company1), 8000);
+        assertEq(company1.balance, 500000000000002000);
+
         (, , , , , , , uint256 remainingTokens, ) = invoiceToken.invoices(invoiceId);
         assertEq(remainingTokens, tokensTotal - purchaseAmount);
     }
@@ -162,14 +168,23 @@ contract InvoiceFinancingTokenTest is Test {
     }
 
     function testCalculateLockedCollateralNoInvoices() public {
-        // TODO 
-    }
-    
-    function testCalculateLockedCollateralWithActiveInvoices() public {
-        // TODO 
+        vm.prank(company1);
+        vm.deal(company1, 10 ether);
+        invoiceToken.depositCollateral{value: 5 ether}();
+
+        assertEq(invoiceToken.companyCollateral(company1), 5 ether);
+
+        uint256 lockedCollateral = invoiceToken.calculateLockedCollateral(company1);
+        assertEq(lockedCollateral, 0, "Locked collateral should be 0 when no invoices exist.");
     }
     
     function testCalculateLockedCollateralNoCollateralDeposited() public {
-        // TODO 
+        vm.prank(company1);
+        vm.deal(company1, 10 ether);
+
+        assertEq(invoiceToken.companyCollateral(company1), 0 ether);
+
+        uint256 lockedCollateral = invoiceToken.calculateLockedCollateral(company1);
+        assertEq(lockedCollateral, 0, "Locked collateral should be 0 when no invoices exist.");
     }
 }
