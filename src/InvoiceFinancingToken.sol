@@ -6,11 +6,12 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /**
- * Invoice Financing with Tokens
+ * @title InvoiceFinancingToken
+ * @dev Tokenized invoice financing using ERC721 tokens
  */
 contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard {
     
-    /** Struct - Invoice details */
+    // Struct to store invoice details
     struct InvoiceDetails {
         uint256 totalInvoiceAmount;
         uint256 tokenPrice;
@@ -23,90 +24,203 @@ contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard {
         string ipfsDocumentHash;
     }
 
-    // Mapping to track Invoice details by tokenId (Token ID)
+    // State variables
     mapping(uint256 => InvoiceDetails) public invoices;
-    
-    // Mapping to track company collateral
     mapping(address => uint256) public companyCollateral;
-
-    // Track active invoices for each company
     mapping(address => uint256[]) private companyActiveInvoices;
-    
-    // Track active free tokens for each invoice
     mapping(uint256 => uint256[]) private invoiceFreeTokens;
 
-    // Custom Errors
+    // Events
+    event CollateralDeposited(address indexed company, uint256 amount);
+    event CollateralWithdrawn(address indexed company, uint256 amount);
+    event InvoiceTokenCreated(uint256 indexed tokenId, uint256 totalAmount, uint256 tokenPrice, uint256 tokensTotal, string ipfsDocumentHash);
+    event InvoiceTokenPurchased(uint256 indexed tokenId, address indexed buyer, uint256 tokenAmount, uint256 paymentAmount);
+    event TokensRedeemed(uint256 indexed tokenId, address indexed user, uint256 tokenAmount, uint256 redemptionAmount);
+
+    // Errors
     error InsufficientCollateral(uint256 available, uint256 required);
+    error InsufficientFreeCollateral(uint256 available, uint256 required);
+    error InvalidCollateralAmount();
     error InvalidInvoiceAmount(uint256 amount);
     error InvalidTokenPrice(uint256 price);
-    error InvalidMaturityDate(uint256 currentTimestamp, uint256 maturityDate);
-    error MissingIPFSHash();
+    error InvalidTokensToBuy(uint256 amount);
     error InvoiceNotActive(uint256 invoiceId);
     error InsufficientTokens(uint256 requested, uint256 available);
     error IncorrectPaymentAmount(uint256 sent, uint256 expected);
+    error TokenPaymentTransferFailed(address companyWallet, address buyer, uint256 amount);
+    error RedemptionPaymentTransferFailed(address companyWallet, address buyer, uint256 amount);
+    error InvalidMaturityDate(uint256 currentTimestamp, uint256 maturityDate);
+    error MissingIPFSHash();
+    error InsufficientFundsToRedeem(address company, address investor, uint256 amount);
 
-    // Events
-    event CollateralDeposited(
-        address indexed company,
-        uint256 amount
-    );
-    event CollateralWithdrawn(
-        address indexed company, 
-        uint256 amount
-    );
-    event InvoiceTokenCreated(
-        uint256 indexed tokenId, 
-        uint256 totalAmount, 
-        uint256 tokenPrice, 
-        uint256 tokensTotal,
-        string ipfsDocumentHash
-    );
-    event InvoiceTokenPurchased(
-        uint256 indexed tokenId,
-        address indexed buyer,
-        uint256 tokenAmount,
-        uint256 paymentAmount
-    );
-    event TokensRedeemed(
-        uint256 indexed tokenId,
-        address indexed user,
-        uint256 tokenAmount,
-        uint256 redemptionAmount
-    );
-
-    // Constructor
     constructor() Ownable(msg.sender) ERC721("InvoiceFinancingToken", "IFT") {}
 
     /**
-     * Internal function to add active invoice
+     * @dev Modifier to ensure sufficient collateral is available for the company.
      */
-    function _addActiveInvoice(address _company, uint256 _invoiceId) private {
+    modifier hasSufficientCollateral(uint256 _requiredCollateral) {
+        uint256 lockedCollateral = calculateLockedCollateral(msg.sender);
+        uint256 availableCollateral = companyCollateral[msg.sender] - lockedCollateral;
+        if(availableCollateral < _requiredCollateral) revert InsufficientCollateral(availableCollateral, _requiredCollateral);
+        _;
+    }
+
+    /**
+     * @dev Deposit collateral for the company.
+     */
+    function depositCollateral() external payable nonReentrant {
+        if (msg.value == 0) revert InvalidCollateralAmount();
+        companyCollateral[msg.sender] += msg.value;
+        emit CollateralDeposited(msg.sender, msg.value);
+    }
+
+    /**
+     * @dev Withdraw collateral for the company.
+     * @param _amount The amount to withdraw.
+     * TODO this function should be only for companies
+     */
+    function withdrawCollateral(
+        uint256 _amount
+    ) external nonReentrant hasSufficientCollateral(_amount) {
+        companyCollateral[msg.sender] -= _amount;
+        payable(msg.sender).transfer(_amount);
+        emit CollateralWithdrawn(msg.sender, _amount);
+    }
+
+    /**
+     * @dev Calculate locked collateral for a company.
+     * @param _company The company address.
+     * @return lockedAmount The amount of locked collateral.
+     */
+    function calculateLockedCollateral(
+        address _company
+    ) public view returns (uint256 lockedAmount) {
+        uint256[] memory activeInvoices = companyActiveInvoices[_company];
+        for (uint256 i = 0; i < activeInvoices.length; i++) {
+            InvoiceDetails memory invoice = invoices[activeInvoices[i]];
+            if (invoice.isActive) lockedAmount += invoice.collateralDeposited;
+        }
+    }
+
+    /**
+     * @dev Create an invoice token.
+     * @param _invoiceId The id of the invoice.
+     * @param _totalInvoiceAmount The full invoice price.
+     * @param _tokenPrice The price per token.
+     * @param _tokensTotal The amount of the total invoice tokens.
+     * @param _maturityDate The maturity date of the invoice.
+     * @param _ipfsDocumentHash The IPSF-hash, where the document is stored.
+     */
+    function createInvoiceToken(
+        uint256 _invoiceId,
+        uint256 _totalInvoiceAmount,
+        uint256 _tokenPrice,
+        uint256 _tokensTotal,
+        uint256 _maturityDate,
+        string calldata _ipfsDocumentHash
+    ) external payable nonReentrant {
+        if (_totalInvoiceAmount == 0) revert InvalidInvoiceAmount(_totalInvoiceAmount);
+        if (_tokenPrice == 0) revert InvalidTokenPrice(_tokenPrice);
+        if (_tokensTotal == 0) revert InvalidTokensToBuy(_tokensTotal);
+        if (_maturityDate <= block.timestamp) revert InvalidMaturityDate(block.timestamp, _maturityDate);
+        if (bytes(_ipfsDocumentHash).length == 0) revert MissingIPFSHash();
+
+        uint256 requiredCollateral = (_tokenPrice * _tokensTotal * 80) / 100;
+        uint256 availableCollateral = companyCollateral[msg.sender] - calculateLockedCollateral(msg.sender);
+        if (availableCollateral < requiredCollateral) revert InsufficientCollateral(availableCollateral, requiredCollateral);
+
+        companyCollateral[msg.sender] -= requiredCollateral;
+
+        invoices[_invoiceId] = InvoiceDetails({
+            totalInvoiceAmount: _totalInvoiceAmount,
+            tokenPrice: _tokenPrice,
+            tokensTotal: _tokensTotal,
+            maturityDate: _maturityDate,
+            companyWallet: msg.sender,
+            collateralDeposited: requiredCollateral,
+            isActive: true,
+            tokensRemaining: _tokensTotal,
+            ipfsDocumentHash: _ipfsDocumentHash
+        });
+
+        for (uint256 i = 0; i < _tokensTotal; i++) {
+            uint256 tokenId = _invoiceId * 1e6 + i;
+            _mint(msg.sender, tokenId);
+            _addFreeInvoiceToken(_invoiceId, tokenId);
+         }
+
+        _addActiveInvoice(msg.sender, _invoiceId);
+        emit InvoiceTokenCreated(_invoiceId, _totalInvoiceAmount, _tokenPrice, _tokensTotal, _ipfsDocumentHash);
+    }
+
+    /**
+     * @dev Purchase invoice tokens.
+     * @param _invoiceId The id of the invoice.
+     * @param _tokenAmount The the amount of the tokens to be bought.
+     */
+    function purchaseToken(
+        uint256 _invoiceId, 
+        uint256 _tokenAmount
+    ) external payable nonReentrant {
+        InvoiceDetails storage invoice = invoices[_invoiceId];
+        if (!invoice.isActive || block.timestamp >= invoice.maturityDate) revert InvoiceNotActive(_invoiceId);
+        if (msg.value != _tokenAmount * invoice.tokenPrice) revert IncorrectPaymentAmount(msg.value, _tokenAmount * invoice.tokenPrice);
+        if (_tokenAmount > invoice.tokensRemaining) revert InsufficientTokens(_tokenAmount, invoice.tokensRemaining);
+
+        invoice.tokensRemaining -= _tokenAmount;
+
+        for (uint256 i = 0; i < _tokenAmount; i++) {
+            uint _tokenId = _popFreeTokenId(_invoiceId);
+             _transfer(invoice.companyWallet, msg.sender, _tokenId);
+        }
+
+        (bool success, ) = invoice.companyWallet.call{value: msg.value}("");
+        if (!success) revert TokenPaymentTransferFailed(invoice.companyWallet, msg.sender, msg.value);
+
+        emit InvoiceTokenPurchased(_invoiceId, msg.sender, _tokenAmount, msg.value);
+    }
+
+    /**
+     * @dev Redeem tokens after maturity date.
+     * @param _invoiceId The id of the invoice.
+     * @param _tokenId The id of the token.
+     */
+    function redeemTokens(
+        uint256 _invoiceId,
+        uint256 _tokenId
+    ) external nonReentrant {
+        InvoiceDetails storage invoice = invoices[_invoiceId];
+        if (block.timestamp < invoice.maturityDate) revert InvalidMaturityDate(block.timestamp, invoice.maturityDate);
+
+        uint256 redemptionAmount = invoice.tokensTotal * invoice.tokenPrice;
+        if (address(this).balance < redemptionAmount) revert InsufficientFundsToRedeem(invoice.companyWallet, msg.sender, redemptionAmount);
+
+        invoice.isActive = false;
+        _removeInactiveInvoice(invoice.companyWallet, _tokenId);
+
+        (bool success, ) = invoice.companyWallet.call{value: redemptionAmount}("");
+        if (!success) revert RedemptionPaymentTransferFailed(invoice.companyWallet, msg.sender, redemptionAmount);
+
+        emit TokensRedeemed(_invoiceId, msg.sender, invoice.tokensTotal, redemptionAmount);
+    }
+
+    
+    /**
+     * @dev Internal function to add active invoice
+     * @param _company The address of the company.
+     * @param _invoiceId The id of the invoice.
+     */
+    function _addActiveInvoice(
+        address _company, 
+        uint256 _invoiceId
+    ) private {
         companyActiveInvoices[_company].push(_invoiceId);
     }
 
     /**
-     * Internal function to add free invoice token
-     */
-    function _addFreeInvoiceToken(uint256 _invoiceId, uint256 _tokenId) private {
-        invoiceFreeTokens[_invoiceId].push(_tokenId);
-    }
-
-    /**
-     * Internal function to fetch one free tokena dn remove it from tht array. 
-     * It fetches the last one and directly pops it to make the function gas-efficient.
-     */
-    function _popFreeTokenId(uint256 _invoiceId) internal returns (uint256) {
-        uint256[] storage freeTokens = invoiceFreeTokens[_invoiceId];
-        require(freeTokens.length > 0, "No free tokens available");
-
-        uint256 tokenId = freeTokens[freeTokens.length - 1];
-        freeTokens.pop();
-
-        return tokenId;
-    }
-
-    /**
-     * Internal function to remove inactive invoice
+     * @dev Internal function to remove inactive invoice
+     * @param _company The address of the company.
+     * @param _invoiceId The id of the invoice.
      */    
     function _removeInactiveInvoice(
         address _company, 
@@ -123,162 +237,33 @@ contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard {
     }
 
     /**
-     * Deposit collateral for the company
+     * @dev Internal function to add free invoice token
+     * @param _invoiceId The id of the invoice.
+     * @param _tokenId The id of the invoice token.
      */
-    function depositCollateral() external payable nonReentrant {
-        require(msg.value > 0, "Deposited collateral must be greater than 0!");
-        companyCollateral[msg.sender] += msg.value;
-
-        emit CollateralDeposited(msg.sender, msg.value);
-    }
-
-    /**
-     * Withdraw collateral for the company
-     */
-    function withdrawCollateral(
-        uint256 _amount
-    ) external nonReentrant {
-        require(companyCollateral[msg.sender] >= _amount, "Insufficient collateral!");
-
-        uint256 lockedCollateral = calculateLockedCollateral(msg.sender);
-        require((companyCollateral[msg.sender] - lockedCollateral) >= _amount, "Cannot withdraw locked collateral. Insufficient free collateral!");
-
-        companyCollateral[msg.sender] -= _amount;
-        payable(msg.sender).transfer(_amount);
-
-        emit CollateralWithdrawn(msg.sender, _amount);
-    }
-
-    /**
-     * Calculate the locked collateral for a company
-     */
-    function calculateLockedCollateral(address _company) public view returns (uint256) {
-        uint256 lockedAmount = 0;
-        uint256[] memory activeInvoices = companyActiveInvoices[_company];
-
-        for (uint256 i = 0; i < activeInvoices.length; i++) {
-            InvoiceDetails memory invoice = invoices[activeInvoices[i]];
-            if (invoice.companyWallet == _company && invoice.isActive) {
-                lockedAmount += invoice.collateralDeposited;
-            }
-        }
-
-        return lockedAmount;
-    }
-
-    /**
-     * Create an Invoice Token
-     */
-    function createInvoiceToken(
-        uint256 _invoiceId,
-        uint256 _totalInvoiceAmount,
-        uint256 _tokenPrice,
-        uint256 _tokensTotal,
-        uint256 _maturityDate,
-        string calldata _ipfsDocumentHash
-    ) external payable nonReentrant {
-        require(_totalInvoiceAmount > 0, "Amount of invoice must be greater than 0.");
-        require(_tokenPrice > 0, "Token price must be greater than 0.");
-        require(_tokensTotal > 0, "Amount of tokens must be greater than 0.");
-        require(_maturityDate > block.timestamp, "Maturity date should be in the future.");
-        require(bytes(_ipfsDocumentHash).length > 0, "IPFS hash is required.");
-
-        // Check if there is sufficient collateral (80% of total token value)
-        uint256 requiredCollateral = (_tokenPrice * _tokensTotal * 80) / 100;
-        uint256 lockedCollateral = calculateLockedCollateral(msg.sender);
-        uint256 availableCollateral = companyCollateral[msg.sender] - lockedCollateral;
-        require(availableCollateral >= requiredCollateral, "Insufficient company collateral");
-        
-        // Lock the required collateral
-        companyCollateral[msg.sender] -= requiredCollateral;
-
-        // Create invoice details
-        InvoiceDetails memory newInvoice = InvoiceDetails({
-            totalInvoiceAmount: _totalInvoiceAmount,
-            tokenPrice: _tokenPrice,
-            tokensTotal: _tokensTotal,
-            maturityDate: _maturityDate,
-            companyWallet: msg.sender,
-            collateralDeposited: requiredCollateral,
-            isActive: true,
-            tokensRemaining: _tokensTotal,
-            ipfsDocumentHash: _ipfsDocumentHash
-        });
-        invoices[_invoiceId] = newInvoice;
-
-        // Mint _tokensTotal Tokens derived from _invoiceId
-        for (uint256 i = 0; i < _tokensTotal; i++) {
-            uint256 _tokenId = _invoiceId * 1e6 + i;
-            _mint(msg.sender, _tokenId);
-            _addFreeInvoiceToken(_invoiceId, _tokenId);
-        }
-
-        // Add active invoice
-        _addActiveInvoice(msg.sender, _invoiceId);
-
-        emit InvoiceTokenCreated(
-            _invoiceId, 
-            _totalInvoiceAmount, 
-            _tokenPrice, 
-            _tokensTotal,
-            _ipfsDocumentHash
-        );
-    }
-
-    /**
-     * Purchase Token (Invoice Token)
-     */
-    function purchaseToken(
-        uint256 _invoiceId,
-        uint256 _tokenAmount
-    ) external payable nonReentrant {
-        InvoiceDetails storage invoice = invoices[_invoiceId];
-
-        // Validation
-        require(invoice.companyWallet != address(0), "Invoice does not exist");
-        require(invoice.isActive, "Invoice is not active");
-        require(_tokenAmount > 0, "Token amount must be greater than 0");
-        require(_tokenAmount <= invoice.tokensRemaining, "Insufficient tokens available");
-        require(msg.value == _tokenAmount * invoice.tokenPrice, "Incorrect payment amount");
-
-        // Update
-        invoice.tokensRemaining -= _tokenAmount;
-
-        // Transfer the Token to the buyer
-        uint _tokenId = _popFreeTokenId(_invoiceId);
-        _transfer(invoice.companyWallet, msg.sender, _tokenId);
-        (bool success, ) = invoice.companyWallet.call{value: msg.value}("");
-        require(success, "Failed to transfer payment to the company");
-
-        emit InvoiceTokenPurchased(_tokenId, msg.sender, _tokenAmount, msg.value);
-    }
-
-    /**
-     * Redeem Token (Invoice) Tokens once maturity date is reached
-     */
-    function redeemTokens(
+    function _addFreeInvoiceToken(
+        uint256 _invoiceId, 
         uint256 _tokenId
-    ) external nonReentrant {
-        InvoiceDetails storage invoice = invoices[_tokenId];
+    ) private {
+        invoiceFreeTokens[_invoiceId].push(_tokenId);
+    }
 
-        // Validate redemption
-        require(block.timestamp >= invoice.maturityDate, "Invoice not mature yet");
+    /**
+     * @dev Internal function to fetch one free tokena dn remove it from tht array. 
+     * It fetches the last one and directly pops it to make the function gas-efficient.
+     * @param _invoiceId The id of the invoice.
+     */
+    function _popFreeTokenId(
+        uint256 _invoiceId
+    ) internal returns (uint256) {
+        uint256[] storage freeTokens = invoiceFreeTokens[_invoiceId];
+        if (freeTokens.length == 0) {
+            revert InsufficientTokens(1, 0);
+        }
+        uint256 tokenId = freeTokens[freeTokens.length - 1];
+        freeTokens.pop();
 
-        // Perform redemption logic
-        uint256 redemptionAmount = invoice.tokensTotal * invoice.tokenPrice;
-        require(address(this).balance >= redemptionAmount, "Insufficient funds to redeem");
-
-        // TODO liquidate collateral 
-
-        // Reset invoice state
-        invoice.isActive = false;
-        _removeInactiveInvoice(invoice.companyWallet, _tokenId);
-
-        // Transfer redemption funds to the company
-        (bool success, ) = invoice.companyWallet.call{value: redemptionAmount}("");
-        require(success, "Redemption transfer failed");
-
-        emit TokensRedeemed(_tokenId, invoice.companyWallet, invoice.tokensTotal, redemptionAmount);
+        return tokenId;
     }
 
     // Fallback and receive functions to accept ETH
