@@ -6,9 +6,9 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /**
- * Invoice Financing with NFTs
+ * Invoice Financing with Tokens
  */
-contract InvoiceFinancingNFT is ERC721, Ownable, ReentrancyGuard {
+contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard {
     
     /** Struct - Invoice details */
     struct InvoiceDetails {
@@ -23,7 +23,7 @@ contract InvoiceFinancingNFT is ERC721, Ownable, ReentrancyGuard {
         string ipfsDocumentHash;
     }
 
-    // Mapping to track Invoice details by tokenId (NFT ID)
+    // Mapping to track Invoice details by tokenId (Token ID)
     mapping(uint256 => InvoiceDetails) public invoices;
     
     // Mapping to track company collateral
@@ -31,6 +31,19 @@ contract InvoiceFinancingNFT is ERC721, Ownable, ReentrancyGuard {
 
     // Track active invoices for each company
     mapping(address => uint256[]) private companyActiveInvoices;
+    
+    // Track active free tokens for each invoice
+    mapping(uint256 => uint256[]) private invoiceFreeTokens;
+
+    // Custom Errors
+    error InsufficientCollateral(uint256 available, uint256 required);
+    error InvalidInvoiceAmount(uint256 amount);
+    error InvalidTokenPrice(uint256 price);
+    error InvalidMaturityDate(uint256 currentTimestamp, uint256 maturityDate);
+    error MissingIPFSHash();
+    error InvoiceNotActive(uint256 invoiceId);
+    error InsufficientTokens(uint256 requested, uint256 available);
+    error IncorrectPaymentAmount(uint256 sent, uint256 expected);
 
     // Events
     event CollateralDeposited(
@@ -41,14 +54,14 @@ contract InvoiceFinancingNFT is ERC721, Ownable, ReentrancyGuard {
         address indexed company, 
         uint256 amount
     );
-    event InvoiceNFTCreated(
+    event InvoiceTokenCreated(
         uint256 indexed tokenId, 
         uint256 totalAmount, 
         uint256 tokenPrice, 
         uint256 tokensTotal,
         string ipfsDocumentHash
     );
-    event InvoiceNFTPurchased(
+    event InvoiceTokenPurchased(
         uint256 indexed tokenId,
         address indexed buyer,
         uint256 tokenAmount,
@@ -62,22 +75,46 @@ contract InvoiceFinancingNFT is ERC721, Ownable, ReentrancyGuard {
     );
 
     // Constructor
-    constructor() Ownable(msg.sender) ERC721("InvoiceFinancingNFT", "IFN") {}
+    constructor() Ownable(msg.sender) ERC721("InvoiceFinancingToken", "IFT") {}
 
     /**
      * Internal function to add active invoice
      */
-    function _addActiveInvoice(address _company, uint256 _tokenId) private {
-        companyActiveInvoices[_company].push(_tokenId);
+    function _addActiveInvoice(address _company, uint256 _invoiceId) private {
+        companyActiveInvoices[_company].push(_invoiceId);
+    }
+
+    /**
+     * Internal function to add free invoice token
+     */
+    function _addFreeInvoiceToken(uint256 _invoiceId, uint256 _tokenId) private {
+        invoiceFreeTokens[_invoiceId].push(_tokenId);
+    }
+
+    /**
+     * Internal function to fetch one free tokena dn remove it from tht array. 
+     * It fetches the last one and directly pops it to make the function gas-efficient.
+     */
+    function _popFreeTokenId(uint256 _invoiceId) internal returns (uint256) {
+        uint256[] storage freeTokens = invoiceFreeTokens[_invoiceId];
+        require(freeTokens.length > 0, "No free tokens available");
+
+        uint256 tokenId = freeTokens[freeTokens.length - 1];
+        freeTokens.pop();
+
+        return tokenId;
     }
 
     /**
      * Internal function to remove inactive invoice
      */    
-    function _removeInactiveInvoice(address _company, uint256 _tokenId) private {
+    function _removeInactiveInvoice(
+        address _company, 
+        uint256 _invoiceId
+    ) private {
         uint256[] storage activeInvoices = companyActiveInvoices[_company];
         for (uint256 i = 0; i < activeInvoices.length; i++) {
-            if (activeInvoices[i] == _tokenId) {
+            if (activeInvoices[i] == _invoiceId) {
                 activeInvoices[i] = activeInvoices[activeInvoices.length - 1];
                 activeInvoices.pop();
                 break;
@@ -98,7 +135,9 @@ contract InvoiceFinancingNFT is ERC721, Ownable, ReentrancyGuard {
     /**
      * Withdraw collateral for the company
      */
-    function withdrawCollateral(uint256 _amount) external nonReentrant {
+    function withdrawCollateral(
+        uint256 _amount
+    ) external nonReentrant {
         require(companyCollateral[msg.sender] >= _amount, "Insufficient collateral!");
 
         uint256 lockedCollateral = calculateLockedCollateral(msg.sender);
@@ -128,9 +167,9 @@ contract InvoiceFinancingNFT is ERC721, Ownable, ReentrancyGuard {
     }
 
     /**
-     * Create an Invoice NFT
+     * Create an Invoice Token
      */
-    function createInvoiceNFT(
+    function createInvoiceToken(
         uint256 _invoiceId,
         uint256 _totalInvoiceAmount,
         uint256 _tokenPrice,
@@ -167,16 +206,17 @@ contract InvoiceFinancingNFT is ERC721, Ownable, ReentrancyGuard {
         });
         invoices[_invoiceId] = newInvoice;
 
-        // Mint _tokensTotal NFTs derived from _invoiceId
+        // Mint _tokensTotal Tokens derived from _invoiceId
         for (uint256 i = 0; i < _tokensTotal; i++) {
-            uint256 tokenId = _invoiceId * 1e6 + i;
-            _mint(msg.sender, tokenId);
+            uint256 _tokenId = _invoiceId * 1e6 + i;
+            _mint(msg.sender, _tokenId);
+            _addFreeInvoiceToken(_invoiceId, _tokenId);
         }
 
         // Add active invoice
         _addActiveInvoice(msg.sender, _invoiceId);
 
-        emit InvoiceNFTCreated(
+        emit InvoiceTokenCreated(
             _invoiceId, 
             _totalInvoiceAmount, 
             _tokenPrice, 
@@ -186,13 +226,13 @@ contract InvoiceFinancingNFT is ERC721, Ownable, ReentrancyGuard {
     }
 
     /**
-     * Purchase NFT (Invoice Token)
+     * Purchase Token (Invoice Token)
      */
-    function purchaseNFT(
-        uint256 _tokenId,
+    function purchaseToken(
+        uint256 _invoiceId,
         uint256 _tokenAmount
     ) external payable nonReentrant {
-        InvoiceDetails storage invoice = invoices[_tokenId];
+        InvoiceDetails storage invoice = invoices[_invoiceId];
 
         // Validation
         require(invoice.companyWallet != address(0), "Invoice does not exist");
@@ -204,18 +244,19 @@ contract InvoiceFinancingNFT is ERC721, Ownable, ReentrancyGuard {
         // Update
         invoice.tokensRemaining -= _tokenAmount;
 
-        // Transfer the NFT to the buyer
-        _transfer(address(this), msg.sender, _tokenId);
+        // Transfer the Token to the buyer
+        uint _tokenId = _popFreeTokenId(_invoiceId);
+        _transfer(invoice.companyWallet, msg.sender, _tokenId);
         (bool success, ) = invoice.companyWallet.call{value: msg.value}("");
         require(success, "Failed to transfer payment to the company");
 
-        emit InvoiceNFTPurchased(_tokenId, msg.sender, _tokenAmount, msg.value);
+        emit InvoiceTokenPurchased(_tokenId, msg.sender, _tokenAmount, msg.value);
     }
 
     /**
-     * Redeem NFT (Invoice) Tokens once maturity date is reached
+     * Redeem Token (Invoice) Tokens once maturity date is reached
      */
-    function redeemNFTTokens(
+    function redeemTokens(
         uint256 _tokenId
     ) external nonReentrant {
         InvoiceDetails storage invoice = invoices[_tokenId];
@@ -226,6 +267,8 @@ contract InvoiceFinancingNFT is ERC721, Ownable, ReentrancyGuard {
         // Perform redemption logic
         uint256 redemptionAmount = invoice.tokensTotal * invoice.tokenPrice;
         require(address(this).balance >= redemptionAmount, "Insufficient funds to redeem");
+
+        // TODO liquidate collateral 
 
         // Reset invoice state
         invoice.isActive = false;
