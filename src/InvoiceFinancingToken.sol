@@ -22,6 +22,7 @@ contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard {
         bool isActive;
         uint256 tokensRemaining;
         string ipfsDocumentHash;
+        uint256[] tokenIds;
     }
 
     // State variables
@@ -29,12 +30,20 @@ contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard {
     mapping(address => uint256) public companyCollateral;
     mapping(address => uint256[]) private companyActiveInvoices;
     mapping(uint256 => uint256[]) private invoiceFreeTokens;
+    mapping(address => uint256[]) public userPurchasedTokens;
+
+    // Minimum deposit amount
+    uint256 public constant MIN_DEPOSIT = 0.1 ether;
+
+    // Minimum percentage of total collateral that will be locked
+    uint256 public constant MIN_LOCK_PERCENTAGE = 80;
 
     // Events
     event CollateralDeposited(address indexed company, uint256 amount);
     event CollateralWithdrawn(address indexed company, uint256 amount);
     event InvoiceTokenCreated(uint256 indexed tokenId, uint256 totalAmount, uint256 tokenPrice, uint256 tokensTotal, string ipfsDocumentHash);
     event InvoiceTokenPurchased(uint256 indexed tokenId, address indexed buyer, uint256 tokenAmount, uint256 paymentAmount);
+    event InvoiceTokenPurchasedback(uint256 indexed tokenId, address indexed buyer, uint256 paymentAmount);
     event TokensRedeemed(uint256 indexed tokenId, address indexed user, uint256 tokenAmount, uint256 redemptionAmount);
 
     // Errors
@@ -52,6 +61,7 @@ contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard {
     error InvalidMaturityDate(uint256 currentTimestamp, uint256 maturityDate);
     error MissingIPFSHash();
     error InsufficientFundsToRedeem(address company, address investor, uint256 amount);
+    error NotTokenOwner(address investor, uint256 tokenId);
 
     constructor() Ownable(msg.sender) ERC721("InvoiceFinancingToken", "IFT") {}
 
@@ -111,14 +121,14 @@ contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @dev Create an invoice token.
-     * @param _invoiceId The id of the invoice.
-     * @param _totalInvoiceAmount The full invoice price.
-     * @param _tokenPrice The price per token.
-     * @param _tokensTotal The amount of the total invoice tokens.
-     * @param _maturityDate The maturity date of the invoice.
-     * @param _ipfsDocumentHash The IPSF-hash, where the document is stored.
-     */
+    * @dev Create an invoice token.
+    * @param _invoiceId The id of the invoice.
+    * @param _totalInvoiceAmount The full invoice price.
+    * @param _tokenPrice The price per token.
+    * @param _tokensTotal The amount of the total invoice tokens.
+    * @param _maturityDate The maturity date of the invoice.
+    * @param _ipfsDocumentHash The IPSF-hash, where the document is stored.
+    */
     function createInvoiceToken(
         uint256 _invoiceId,
         uint256 _totalInvoiceAmount,
@@ -127,15 +137,27 @@ contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard {
         uint256 _maturityDate,
         string calldata _ipfsDocumentHash
     ) external payable nonReentrant {
+        // Input validations
         if (_totalInvoiceAmount == 0) revert InvalidInvoiceAmount(_totalInvoiceAmount);
         if (_tokenPrice == 0) revert InvalidTokenPrice(_tokenPrice);
         if (_tokensTotal == 0) revert InvalidTokensToBuy(_tokensTotal);
         if (_maturityDate <= block.timestamp) revert InvalidMaturityDate(block.timestamp, _maturityDate);
         if (bytes(_ipfsDocumentHash).length == 0) revert MissingIPFSHash();
 
-        uint256 requiredCollateral = (_tokenPrice * _tokensTotal * 80) / 100; // TODO *calculateRequiredCollateral* implement better approach calculating the required collateral in stable coin. fetch the ETH/USDT price from oracle.
+        // Collateral calculation (80% of total token value)
+        uint256 requiredCollateral = (_tokenPrice * _tokensTotal * 80) / 100;
         uint256 availableCollateral = companyCollateral[msg.sender] - calculateLockedCollateral(msg.sender);
         if (availableCollateral < requiredCollateral) revert InsufficientCollateral(availableCollateral, requiredCollateral);
+
+        uint256[] memory tokenIds = new uint256[](_tokensTotal);
+
+        // Mint tokens and track token IDs
+        for (uint256 i = 0; i < _tokensTotal; i++) {
+            uint256 tokenId = _invoiceId * 1e6 + i;
+            _mint(msg.sender, tokenId);
+            _addFreeInvoiceToken(_invoiceId, tokenId);
+            tokenIds[i] = tokenId;
+        }
 
         companyCollateral[msg.sender] -= requiredCollateral;
 
@@ -148,14 +170,9 @@ contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard {
             collateralDeposited: requiredCollateral,
             isActive: true,
             tokensRemaining: _tokensTotal,
-            ipfsDocumentHash: _ipfsDocumentHash
+            ipfsDocumentHash: _ipfsDocumentHash,
+            tokenIds: tokenIds
         });
-
-        for (uint256 i = 0; i < _tokensTotal; i++) {
-            uint256 tokenId = _invoiceId * 1e6 + i;
-            _mint(msg.sender, tokenId);
-            _addFreeInvoiceToken(_invoiceId, tokenId);
-         }
 
         _addActiveInvoice(msg.sender, _invoiceId);
         emit InvoiceTokenCreated(_invoiceId, _totalInvoiceAmount, _tokenPrice, _tokensTotal, _ipfsDocumentHash);
@@ -180,6 +197,7 @@ contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard {
         for (uint256 i = 0; i < _tokenAmount; i++) {
             uint _tokenId = _popFreeTokenId(_invoiceId);
              _transfer(invoice.companyWallet, msg.sender, _tokenId);
+            userPurchasedTokens[msg.sender].push(_tokenId);
         }
 
         (bool success, ) = invoice.companyWallet.call{value: msg.value}("");
@@ -189,29 +207,40 @@ contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @dev Redeem tokens after maturity date.
-     * @param _invoiceId The id of the invoice.
-     * @param _tokenId The id of the token.
-     */
+    * @dev Redeem tokens after maturity date.
+    * @param _invoiceId The id of the invoice.
+    */
     function redeemTokens(
-        uint256 _invoiceId,
-        uint256 _tokenId
+        uint256 _invoiceId
     ) external nonReentrant onlyCompany(_invoiceId) {
         InvoiceDetails storage invoice = invoices[_invoiceId];
-        if (block.timestamp < invoice.maturityDate) revert InvalidMaturityDate(block.timestamp, invoice.maturityDate);
+        
+        if (block.timestamp < invoice.maturityDate) 
+            revert InvalidMaturityDate(block.timestamp, invoice.maturityDate);
 
-        uint256 redemptionAmount = invoice.tokensTotal * invoice.tokenPrice;
-        if (address(this).balance < redemptionAmount) revert InsufficientFundsToRedeem(invoice.companyWallet, msg.sender, redemptionAmount);
+        uint256 soldTokens = invoice.tokensTotal - invoice.tokensRemaining;
+        uint256 redemptionAmount = soldTokens * invoice.tokenPrice;
+
+        if (invoice.companyWallet.balance < redemptionAmount) 
+            revert InsufficientFundsToRedeem(invoice.companyWallet, msg.sender, redemptionAmount);
+
+        for (uint256 i = 0; i < invoice.tokensTotal; i++) {
+            uint256 tokenId = invoice.tokenIds[i];
+            address tokenOwner = ownerOf(tokenId);
+            if (tokenOwner != msg.sender) {
+                _transfer(tokenOwner, invoice.companyWallet, tokenId);
+                emit InvoiceTokenPurchasedback(tokenId, msg.sender, invoice.tokenPrice);
+
+                (bool success, ) = tokenOwner.call{value: invoice.tokenPrice}("");
+                if (!success) revert RedemptionPaymentTransferFailed(invoice.companyWallet, tokenOwner, invoice.tokenPrice);
+            }
+        }
 
         invoice.isActive = false;
-        _removeInactiveInvoice(invoice.companyWallet, _tokenId);
+        _removeInactiveInvoice(invoice.companyWallet, _invoiceId);
 
-        (bool success, ) = invoice.companyWallet.call{value: redemptionAmount}("");
-        if (!success) revert RedemptionPaymentTransferFailed(invoice.companyWallet, msg.sender, redemptionAmount);
-
-        emit TokensRedeemed(_invoiceId, msg.sender, invoice.tokensTotal, redemptionAmount);
+        emit TokensRedeemed(_invoiceId, msg.sender, soldTokens, redemptionAmount);
     }
-
     
     /**
      * @dev Internal function to add active invoice
@@ -272,6 +301,16 @@ contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard {
         freeTokens.pop();
 
         return tokenId;
+    }
+
+    /**
+     * @dev Function to fetch user tokens. 
+     * @param user The address of the user.
+     */
+    function getPurchasedTokens(
+        address user
+    ) external view returns (uint256[] memory) {
+        return userPurchasedTokens[user];
     }
 
     // Fallback and receive functions to accept ETH

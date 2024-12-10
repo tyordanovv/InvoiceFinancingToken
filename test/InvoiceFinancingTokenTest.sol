@@ -11,12 +11,21 @@ contract InvoiceFinancingTokenTest is Test {
     address public owner;
     address public company1;
     address public investor1;
+    address public investor2;
+
+    uint256 invoiceId = 1;
+    uint256 totalAmount = 10000;
+    uint256 tokenPrice = 1000;
+    uint256 tokensTotal = 10;
+    uint256 maturityDate = block.timestamp + 30 days;
+    string ipfsHash = "QmHash123";
 
     function setUp() public {
         // Setup accounts
         owner = makeAddr("owner");
         company1 = makeAddr("company1");
         investor1 = makeAddr("investor1");
+        investor2 = makeAddr("investor2");
 
         // Deploy contract
         vm.prank(owner);
@@ -42,14 +51,6 @@ contract InvoiceFinancingTokenTest is Test {
         vm.startPrank(company1);
         vm.deal(company1, 10 ether);
         invoiceToken.depositCollateral{value: 5 ether}();
-
-        // Create invoice token
-        uint256 invoiceId = 1;
-        uint256 totalAmount = 10000;
-        uint256 tokenPrice = 100;
-        uint256 tokensTotal = 100;
-        uint256 maturityDate = block.timestamp + 30 days;
-        string memory ipfsHash = "QmHash123";
 
         invoiceToken.createInvoiceToken(
             invoiceId, 
@@ -91,14 +92,6 @@ contract InvoiceFinancingTokenTest is Test {
         vm.startPrank(company1);
         vm.deal(company1, 10 ether);
 
-        // Prepare invoice token parameters
-        uint256 invoiceId = 1;
-        uint256 totalAmount = 10000;
-        uint256 tokenPrice = 100;
-        uint256 tokensTotal = 100;
-        uint256 maturityDate = block.timestamp + 30 days;
-        string memory ipfsHash = "QmHash123";
-
         vm.expectRevert();
         invoiceToken.createInvoiceToken(
             invoiceId, 
@@ -117,13 +110,6 @@ contract InvoiceFinancingTokenTest is Test {
         vm.startPrank(company1);
         vm.deal(company1, 10 ether);
         invoiceToken.depositCollateral{value: 5 ether}();
-
-        uint256 invoiceId = 1;
-        uint256 totalAmount = 10000;
-        uint256 tokenPrice = 1000;
-        uint256 tokensTotal = 10;
-        uint256 maturityDate = block.timestamp + 30 days;
-        string memory ipfsHash = "QmHash123";
 
         invoiceToken.createInvoiceToken(
             invoiceId, 
@@ -149,22 +135,132 @@ contract InvoiceFinancingTokenTest is Test {
 
         // Verify purchase
         assertEq(invoiceToken.calculateLockedCollateral(company1), 8000);
-        assertEq(company1.balance, 500000000000002000);
+        assertEq(company1.balance, 5000000000000002000);
+
+        (, , , , , , , uint256 remainingTokens, ) = invoiceToken.invoices(invoiceId);
+        assertEq(remainingTokens, tokensTotal - purchaseAmount);
+    }
+
+    function testPurchaseMoreThanAvailableTokens() public {
+        // Prepare company with collateral and create invoice
+        vm.startPrank(company1);
+        vm.deal(company1, 10 ether);
+        invoiceToken.depositCollateral{value: 5 ether}();
+
+        invoiceToken.createInvoiceToken(
+            invoiceId, 
+            totalAmount, 
+            tokenPrice, 
+            tokensTotal, 
+            maturityDate, 
+            ipfsHash
+        );
+        vm.stopPrank();
+
+        // Prepare investor 1
+        vm.startPrank(investor1);
+        vm.deal(investor1, 10 ether);
+
+        // Purchase tokens
+        uint256 purchaseAmount = 6;
+        invoiceToken.purchaseToken{value: purchaseAmount * tokenPrice}(
+            invoiceId, 
+            purchaseAmount
+        );
+        vm.stopPrank();
+
+        // Prepare investor 2
+        vm.startPrank(investor2);
+        vm.deal(investor2, 10 ether);
+
+        // Purchase tokens
+        vm.expectRevert();
+        invoiceToken.purchaseToken{value: purchaseAmount * tokenPrice}(
+            invoiceId, 
+            purchaseAmount
+        );
+        vm.stopPrank();
+
+        // Verify purchase
+        assertEq(invoiceToken.calculateLockedCollateral(company1), 8000);
+        assertEq(company1.balance, 5000000000000006000);
 
         (, , , , , , , uint256 remainingTokens, ) = invoiceToken.invoices(invoiceId);
         assertEq(remainingTokens, tokensTotal - purchaseAmount);
     }
 
     function testSuccessRedeemTokens() public {
-        // TODO 
+        vm.startPrank(company1);
+        vm.deal(company1, 10 ether);
+        invoiceToken.depositCollateral{value: 5 ether}();
+
+        invoiceToken.createInvoiceToken(
+            invoiceId, 
+            totalAmount, 
+            tokenPrice, 
+            tokensTotal, 
+            maturityDate, 
+            ipfsHash
+        );
+        vm.stopPrank();
+
+        // Prepare investor
+        vm.startPrank(investor1);
+        vm.deal(investor1, 10 ether);
+
+        // Purchase tokens
+        uint256 purchaseAmount = 2;
+        invoiceToken.purchaseToken{value: purchaseAmount * tokenPrice}(
+            invoiceId, 
+            purchaseAmount
+        );
+        vm.stopPrank();
+
+        uint256[] memory userTokens = invoiceToken.getPurchasedTokens(investor1);
+        assertEq(userTokens.length, purchaseAmount);
+
+        vm.warp(maturityDate + 1);
+
+        vm.startPrank(company1);
+        invoiceToken.redeemTokens(invoiceId);
+        for (uint256 i = 0; i < userTokens.length; i++) {
+            uint256 tokenId = userTokens[i];
+            assertEq(invoiceToken.ownerOf(tokenId), company1);
+        }
+        vm.stopPrank();
     }
 
     function testErrorRedeemTokensNotMature() public {
-        // TODO 
-    }
+        vm.startPrank(company1);
+        vm.deal(company1, 10 ether);
+        invoiceToken.depositCollateral{value: 5 ether}();
 
-    function testErrorRedeemTokensNotMatureInsufficientFunds() public {
-        // TODO 
+        invoiceToken.createInvoiceToken(
+            invoiceId, 
+            totalAmount, 
+            tokenPrice, 
+            tokensTotal, 
+            maturityDate, 
+            ipfsHash
+        );
+        vm.stopPrank();
+
+        // Prepare investor
+        vm.startPrank(investor1);
+        vm.deal(investor1, 10 ether);
+
+        // Purchase tokens
+        uint256 purchaseAmount = 2;
+        invoiceToken.purchaseToken{value: purchaseAmount * tokenPrice}(
+            invoiceId, 
+            purchaseAmount
+        );
+        vm.stopPrank();
+
+        vm.startPrank(company1);
+        vm.expectRevert();
+        invoiceToken.redeemTokens(invoiceId);
+        vm.stopPrank();
     }
 
     function testCalculateLockedCollateralNoInvoices() public {
