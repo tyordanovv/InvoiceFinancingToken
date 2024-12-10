@@ -4,27 +4,13 @@ pragma solidity ^0.8.28;
 import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "./interfaces/IInvoiceFinancingToken.sol";
 
 /**
  * @title InvoiceFinancingToken
- * @dev Tokenized invoice financing using ERC721 tokens
+ * @dev Implementation of the IInvoiceFinancingToken interface
  */
-contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard {
-    
-    // Struct to store invoice details
-    struct InvoiceDetails {
-        uint256 totalInvoiceAmount;
-        uint256 tokenPrice;
-        uint256 tokensTotal;
-        uint256 maturityDate;
-        address companyWallet;
-        uint256 collateralDeposited;
-        bool isActive;
-        uint256 tokensRemaining;
-        string ipfsDocumentHash;
-        uint256[] tokenIds;
-    }
-
+contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard, IInvoiceFinancingToken {
     // State variables
     mapping(uint256 => InvoiceDetails) public invoices;
     mapping(address => uint256) public companyCollateral;
@@ -37,14 +23,6 @@ contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard {
 
     // Minimum percentage of total collateral that will be locked
     uint256 public constant MIN_LOCK_PERCENTAGE = 80;
-
-    // Events
-    event CollateralDeposited(address indexed company, uint256 amount);
-    event CollateralWithdrawn(address indexed company, uint256 amount);
-    event InvoiceTokenCreated(uint256 indexed tokenId, uint256 totalAmount, uint256 tokenPrice, uint256 tokensTotal, string ipfsDocumentHash);
-    event InvoiceTokenPurchased(uint256 indexed tokenId, address indexed buyer, uint256 tokenAmount, uint256 paymentAmount);
-    event InvoiceTokenPurchasedback(uint256 indexed tokenId, address indexed buyer, uint256 paymentAmount);
-    event TokensRedeemed(uint256 indexed tokenId, address indexed user, uint256 tokenAmount, uint256 redemptionAmount);
 
     // Errors
     error InsufficientCollateral(uint256 available, uint256 required);
@@ -84,7 +62,7 @@ contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @dev Deposit collateral for the company.
+     * @dev See {IInvoiceFinancingToken-depositCollateral}.
      */
     function depositCollateral() external payable nonReentrant {
         if (msg.value == 0) revert InvalidCollateralAmount();
@@ -92,10 +70,9 @@ contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard {
         emit CollateralDeposited(msg.sender, msg.value);
     }
 
+
     /**
-     * @dev Withdraw collateral for the company.
-     * @param _amount The amount to withdraw.
-     * TODO this function should be only for companies
+     * @dev See {IInvoiceFinancingToken-withdrawCollateral}.
      */
     function withdrawCollateral(
         uint256 _amount
@@ -106,9 +83,7 @@ contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @dev Calculate locked collateral for a company.
-     * @param _company The company address.
-     * @return lockedAmount The amount of locked collateral.
+     * @dev See {IInvoiceFinancingToken-calculateLockedCollateral}.
      */
     function calculateLockedCollateral(
         address _company
@@ -121,14 +96,8 @@ contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard {
     }
 
     /**
-    * @dev Create an invoice token.
-    * @param _invoiceId The id of the invoice.
-    * @param _totalInvoiceAmount The full invoice price.
-    * @param _tokenPrice The price per token.
-    * @param _tokensTotal The amount of the total invoice tokens.
-    * @param _maturityDate The maturity date of the invoice.
-    * @param _ipfsDocumentHash The IPSF-hash, where the document is stored.
-    */
+     * @dev See {IInvoiceFinancingToken-createInvoiceToken}.
+     */
     function createInvoiceToken(
         uint256 _invoiceId,
         uint256 _totalInvoiceAmount,
@@ -137,7 +106,6 @@ contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard {
         uint256 _maturityDate,
         string calldata _ipfsDocumentHash
     ) external payable nonReentrant {
-        // Input validations
         if (_totalInvoiceAmount == 0) revert InvalidInvoiceAmount(_totalInvoiceAmount);
         if (_tokenPrice == 0) revert InvalidTokenPrice(_tokenPrice);
         if (_tokensTotal == 0) revert InvalidTokensToBuy(_tokensTotal);
@@ -179,9 +147,7 @@ contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @dev Purchase invoice tokens.
-     * @param _invoiceId The id of the invoice.
-     * @param _tokenAmount The the amount of the tokens to be bought.
+     * @dev See {IInvoiceFinancingToken-purchaseToken}.
      */
     function purchaseToken(
         uint256 _invoiceId, 
@@ -207,9 +173,8 @@ contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard {
     }
 
     /**
-    * @dev Redeem tokens after maturity date.
-    * @param _invoiceId The id of the invoice.
-    */
+     * @dev See {IInvoiceFinancingToken-redeemTokens}.
+     */
     function redeemTokens(
         uint256 _invoiceId
     ) external nonReentrant onlyCompany(_invoiceId) {
