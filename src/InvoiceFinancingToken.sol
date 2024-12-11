@@ -13,10 +13,10 @@ import "./interfaces/IInvoiceFinancingToken.sol";
 contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard, IInvoiceFinancingToken {
     // State variables
     mapping(uint256 => InvoiceDetails) public invoices;
-    mapping(address => uint256) public companyCollateral;
+    mapping(address => uint256) private companyCollateral;
     mapping(address => uint256[]) private companyActiveInvoices;
     mapping(uint256 => uint256[]) private invoiceFreeTokens;
-    mapping(address => uint256[]) public userPurchasedTokens;
+    mapping(address => uint256[]) private userPurchasedTokens;
 
     // Minimum deposit amount
     uint256 public constant MIN_DEPOSIT = 0.1 ether;
@@ -65,7 +65,7 @@ contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard, IInvoiceFina
      * @dev See {IInvoiceFinancingToken-depositCollateral}.
      */
     function depositCollateral() external payable nonReentrant {
-        if (msg.value == 0) revert InvalidCollateralAmount();
+        if (msg.value < MIN_DEPOSIT) revert InvalidCollateralAmount();
         companyCollateral[msg.sender] += msg.value;
         emit CollateralDeposited(msg.sender, msg.value);
     }
@@ -276,6 +276,17 @@ contract InvoiceFinancingToken is ERC721, Ownable, ReentrancyGuard, IInvoiceFina
         address user
     ) external view returns (uint256[] memory) {
         return userPurchasedTokens[user];
+    }
+
+    /**
+     * @dev Function to fetch company active invoices. 
+     * @param company The address of the company.
+     */
+    function getCompanyActiveInvoices(
+        address company
+    ) external view returns (uint256[] memory) {
+        require(msg.sender == company, "Not authorized");
+        return companyActiveInvoices[company];
     }
 
     // Fallback and receive functions to accept ETH
